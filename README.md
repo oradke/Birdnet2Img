@@ -9,11 +9,13 @@ It is designed for simple home-lab and wildlife-monitoring setups where BirdNET-
 - Connects to the BirdNET-Go SSE endpoint at `/api/v2/detections/stream`
 - Parses BirdNET-Go detection payloads, including the `birdImage.URL` field
 - Downloads the bird image with browser-like headers to avoid common CDN `403` issues
+- Uses local image caching with conditional HTTP validation (`ETag` / `Last-Modified`)
 - Crops and resizes the image to `64x64` for Pixoo
 - Sends the image to a Pixoo device on the local network
 - Logs detections to `detections.log`
 - Continues running when individual detections fail
 - Handles Pixoo send timeouts without crashing the stream listener
+- Automatically reconnects to BirdNET-Go SSE with exponential backoff
 
 ## Project Files
 
@@ -72,6 +74,30 @@ The script uses environment variables:
   Base URL of the BirdNET-Go instance.  
   Default: `http://192.168.2.135:8127`
 
+- `IMAGE_CACHE_ENABLED`  
+  Enable or disable local image caching.  
+  Default: `1`
+
+- `IMAGE_CACHE_DIR`  
+  Directory used for cached image files and metadata sidecars.  
+  Default: `<project>/cache/images`
+
+- `SSE_CONNECT_TIMEOUT_SECONDS`  
+  HTTP connect timeout for SSE stream setup.  
+  Default: `10`
+
+- `SSE_READ_TIMEOUT_SECONDS`  
+  SSE read timeout. If no data arrives (for example no heartbeat), reconnect is triggered.  
+  Default: `65`
+
+- `SSE_RECONNECT_BASE_SECONDS`  
+  Initial reconnect delay after stream failure.  
+  Default: `5`
+
+- `SSE_RECONNECT_MAX_SECONDS`  
+  Maximum reconnect delay cap.  
+  Default: `60`
+
 Example:
 
 ```bash
@@ -119,14 +145,29 @@ The image URL is primarily taken from:
 
 with a small set of fallback keys for compatibility.
 
+## Image Cache Behavior
+
+When image caching is enabled, downloaded images are stored under `cache/images`.
+
+On later fetches of the same URL, the script sends conditional headers:
+
+- `If-None-Match` from cached `ETag`
+- `If-Modified-Since` from cached `Last-Modified`
+
+If the server responds with `304 Not Modified`, the cached image is used.
+
+If the network fetch fails and a cached image exists, the cached image is used as a fallback.
+
 ## Error Handling
 
 The script is intentionally defensive:
 
 - image download retries on `403` and `429`
+- cached images are validated with conditional HTTP requests
 - Pixoo timeouts are logged and ignored
 - per-detection failures do not stop the SSE listener
 - malformed or incomplete detections are skipped through exception handling in the stream loop
+- BirdNET-Go stream failures trigger automatic reconnect with backoff
 
 ## Raspberry Pi Daemon Setup
 
@@ -203,7 +244,6 @@ journalctl -u birdnet-sse.service -f
 
 Possible next steps:
 
-- automatic SSE reconnect with backoff after BirdNET-Go restarts
 - duplicate detection suppression based on event ID or timestamp
 - overlaying species name or confidence on the Pixoo image
-- caching remote bird images locally to reduce repeated downloads
+- periodic cache cleanup/retention policy

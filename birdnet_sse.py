@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import sseclient
 import json
 import requests
@@ -7,6 +8,7 @@ import time
 from PIL import Image, ImageOps
 from pixoo1664 import Pixoo
 import urllib.request
+import urllib.parse
 from urllib.error import HTTPError
 import os
 from io import BytesIO
@@ -17,6 +19,10 @@ SSE_CONNECT_TIMEOUT_SECONDS = float(os.getenv("SSE_CONNECT_TIMEOUT_SECONDS", "10
 SSE_READ_TIMEOUT_SECONDS = float(os.getenv("SSE_READ_TIMEOUT_SECONDS", "65"))
 SSE_RECONNECT_BASE_SECONDS = float(os.getenv("SSE_RECONNECT_BASE_SECONDS", "5"))
 SSE_RECONNECT_MAX_SECONDS = float(os.getenv("SSE_RECONNECT_MAX_SECONDS", "60"))
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+IMAGE_CACHE_DIR = os.getenv("IMAGE_CACHE_DIR", os.path.join(PROJECT_DIR, "cache", "images"))
+IMAGE_CACHE_ENABLED = os.getenv("IMAGE_CACHE_ENABLED", "1").lower() not in ("0", "false", "no")
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".avif"}
 
 
 def first_present(d: dict, keys, default=None):
@@ -55,7 +61,86 @@ def extract_detection_fields(detection: dict):
         "image_url": image_url,
     }
 
+
+def cache_path_for_url(url: str):
+    parsed = urllib.parse.urlparse(url)
+    extension = os.path.splitext(parsed.path)[1].lower()
+    if extension not in ALLOWED_IMAGE_EXTENSIONS:
+        extension = ".img"
+
+    file_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    return os.path.join(IMAGE_CACHE_DIR, f"{file_hash}{extension}")
+
+
+def cache_meta_path(cache_path: str):
+    return f"{cache_path}.meta.json"
+
+
+def load_image_from_bytes(raw: bytes):
+    return Image.open(BytesIO(raw)).convert("RGB")
+
+
+def load_cached_image(cache_path: str):
+    with open(cache_path, "rb") as handle:
+        raw = handle.read()
+    return load_image_from_bytes(raw)
+
+
+def save_cached_image(cache_path: str, raw: bytes):
+    os.makedirs(IMAGE_CACHE_DIR, exist_ok=True)
+    temp_path = f"{cache_path}.tmp"
+    with open(temp_path, "wb") as handle:
+        handle.write(raw)
+    os.replace(temp_path, cache_path)
+
+
+def load_cache_metadata(meta_path: str):
+    if not os.path.exists(meta_path):
+        return {}
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            if isinstance(data, dict):
+                return data
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    return {}
+
+
+def save_cache_metadata(meta_path: str, source_url: str, etag: str = "", last_modified: str = ""):
+    payload = {
+        "url": source_url,
+        "etag": etag,
+        "last_modified": last_modified,
+        "updated_at": int(time.time()),
+    }
+
+    temp_path = f"{meta_path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    os.replace(temp_path, meta_path)
+
 def image_from_url(url: str):
+    cache_path = cache_path_for_url(url)
+    meta_path = cache_meta_path(cache_path)
+    metadata = load_cache_metadata(meta_path) if IMAGE_CACHE_ENABLED else {}
+
+    if IMAGE_CACHE_ENABLED and os.path.exists(cache_path):
+        try:
+            load_cached_image(cache_path)
+        except Exception as exc:
+            print(f"⚠️ Cached image invalid, re-fetching: {exc}")
+            try:
+                os.remove(cache_path)
+            except OSError:
+                pass
+            try:
+                os.remove(meta_path)
+            except OSError:
+                pass
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -68,18 +153,47 @@ def image_from_url(url: str):
         "Connection": "keep-alive",
     }
 
+    if IMAGE_CACHE_ENABLED and os.path.exists(cache_path):
+        etag = metadata.get("etag", "")
+        last_modified = metadata.get("last_modified", "")
+        if etag:
+            headers["If-None-Match"] = etag
+        if last_modified:
+            headers["If-Modified-Since"] = last_modified
+
     last_error = None
     for attempt in range(3):
         req = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=12) as response:
                 raw = response.read()
-            return Image.open(BytesIO(raw)).convert("RGB")
+
+            etag = response.headers.get("ETag", "")
+            last_modified = response.headers.get("Last-Modified", "")
+
+            if IMAGE_CACHE_ENABLED:
+                try:
+                    save_cached_image(cache_path, raw)
+                    save_cache_metadata(meta_path, url, etag=etag, last_modified=last_modified)
+                except OSError as exc:
+                    print(f"⚠️ Could not save image cache: {exc}")
+
+            return load_image_from_bytes(raw)
         except HTTPError as exc:
+            if exc.code == 304 and IMAGE_CACHE_ENABLED and os.path.exists(cache_path):
+                return load_cached_image(cache_path)
+
             last_error = exc
             if exc.code not in (403, 429):
                 raise
             time.sleep(1.5 * (attempt + 1))
+
+    if IMAGE_CACHE_ENABLED and os.path.exists(cache_path):
+        try:
+            print("⚠️ Falling back to cached image due to fetch errors")
+            return load_cached_image(cache_path)
+        except Exception:
+            pass
 
     if last_error:
         raise last_error
