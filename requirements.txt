@@ -1,0 +1,4 @@
+Pillow
+requests
+sseclient-py
+pixoo1664
