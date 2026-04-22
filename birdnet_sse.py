@@ -13,6 +13,10 @@ from io import BytesIO
 
 PIXOO_IP = os.getenv("PIXOO_IP", "192.168.2.230")
 BIRDNET_GO_BASE_URL = os.getenv("BIRDNET_GO_BASE_URL", "http://192.168.2.135:8127")
+SSE_CONNECT_TIMEOUT_SECONDS = float(os.getenv("SSE_CONNECT_TIMEOUT_SECONDS", "10"))
+SSE_READ_TIMEOUT_SECONDS = float(os.getenv("SSE_READ_TIMEOUT_SECONDS", "65"))
+SSE_RECONNECT_BASE_SECONDS = float(os.getenv("SSE_RECONNECT_BASE_SECONDS", "5"))
+SSE_RECONNECT_MAX_SECONDS = float(os.getenv("SSE_RECONNECT_MAX_SECONDS", "60"))
 
 
 def first_present(d: dict, keys, default=None):
@@ -82,6 +86,55 @@ def image_from_url(url: str):
 
     raise RuntimeError(f"Failed to fetch image URL: {url}")
 
+
+def process_stream_event(event):
+    if event.event == 'connected':
+        data = json.loads(event.data)
+        print(f"✅ Connected: {data['message']}")
+        return
+
+    if event.event == 'heartbeat':
+        data = json.loads(event.data)
+        print(f"💓 Heartbeat - {data['clients']} clients connected")
+        return
+
+    if event.event != 'detection':
+        return
+
+    detection = json.loads(event.data)
+    parsed = extract_detection_fields(detection)
+
+    print(f"🐦 {parsed['common_name']} detected!")
+    print(f"   Scientific: {parsed['scientific_name']}")
+    print(f"   Confidence: {parsed['confidence']:.2f}")
+    print(f"   Time: {parsed['time']}")
+    print(f"   Source: {parsed['source']}")
+    print(f"   Image URL: {parsed['image_url']}")
+
+    try:
+        process_detection(parsed)
+    except Exception as e:
+        print(f"⚠️ Detection processing failed, continuing stream: {e}")
+
+
+def stream_detections_once(url: str):
+    with requests.get(
+        url,
+        stream=True,
+        headers={'Accept': 'text/event-stream'},
+        timeout=(SSE_CONNECT_TIMEOUT_SECONDS, SSE_READ_TIMEOUT_SECONDS),
+    ) as response:
+        response.raise_for_status()
+        client = sseclient.SSEClient(response)  # type: ignore[arg-type]
+
+        print(f"Connected to BirdNET-Go detection stream at {url}...")
+
+        for event in client.events():
+            process_stream_event(event)
+
+    raise RuntimeError("BirdNET-Go SSE stream ended unexpectedly")
+
+
 def listen_to_detections(base_url=BIRDNET_GO_BASE_URL):
     """
     Listen to BirdNET-Go detection stream and process detections.
@@ -89,45 +142,20 @@ def listen_to_detections(base_url=BIRDNET_GO_BASE_URL):
     Requires: pip install sseclient-py requests
     """
     url = f"{base_url}/api/v2/detections/stream"
+    reconnect_delay = SSE_RECONNECT_BASE_SECONDS
 
-    try:
-        response = requests.get(url, stream=True, headers={'Accept': 'text/event-stream'})
-        client = sseclient.SSEClient(response)  # type: ignore[arg-type]
-
-        print("Connected to BirdNET-Go detection stream...")
-
-        for event in client.events():
-            if event.event == 'connected':
-                data = json.loads(event.data)
-                print(f"✅ Connected: {data['message']}")
-
-            elif event.event == 'detection':
-                detection = json.loads(event.data)
-
-                parsed = extract_detection_fields(detection)
-
-                # Process the detection
-                print(f"🐦 {parsed['common_name']} detected!")
-                print(f"   Scientific: {parsed['scientific_name']}")
-                print(f"   Confidence: {parsed['confidence']:.2f}")
-                print(f"   Time: {parsed['time']}")
-                print(f"   Source: {parsed['source']}")
-                print(f"   Image URL: {parsed['image_url']}")
-
-                # Your custom processing here
-                try:
-                    process_detection(parsed)
-                except Exception as e:
-                    print(f"⚠️ Detection processing failed, continuing stream: {e}")
-
-            elif event.event == 'heartbeat':
-                data = json.loads(event.data)
-                print(f"💓 Heartbeat - {data['clients']} clients connected")
-
-    except KeyboardInterrupt:
-        print("\n👋 Disconnecting from stream...")
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    while True:
+        try:
+            stream_detections_once(url)
+            reconnect_delay = SSE_RECONNECT_BASE_SECONDS
+        except KeyboardInterrupt:
+            print("\n👋 Disconnecting from stream...")
+            return
+        except Exception as e:
+            print(f"❌ BirdNET-Go stream error: {e}")
+            print(f"↻ Reconnecting in {reconnect_delay:.1f}s...")
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, SSE_RECONNECT_MAX_SECONDS)
 
 def process_detection(detection):
     """
