@@ -74,6 +74,10 @@ The script uses environment variables:
   Base URL of the BirdNET-Go instance.  
   Default: `http://192.168.2.135:8127`
 
+- `SHOW_BIRD_NAME`  
+  Draw detected bird name at the bottom of the image.  
+  Default: `1`
+
 - `IMAGE_CACHE_ENABLED`  
   Enable or disable local image caching.  
   Default: `1`
@@ -237,6 +241,7 @@ journalctl -u birdnet-sse.service -f
 ## Notes
 
 - The current image pipeline uses crop-to-fill via `ImageOps.fit` so the Pixoo screen is fully covered.
+- If `SHOW_BIRD_NAME=1`, a small bottom label strip is drawn with the bird name.
 - `detections.log` is local runtime output and is ignored by Git.
 - `.venv/` is also ignored by Git.
 

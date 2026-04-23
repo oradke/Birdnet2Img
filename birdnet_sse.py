@@ -5,12 +5,13 @@ import json
 import requests
 import socket
 import time
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw, ImageFont
 from pixoo1664 import Pixoo
 import urllib.request
 import urllib.parse
 from urllib.error import HTTPError
 import os
+from typing import Any
 from io import BytesIO
 
 PIXOO_IP = os.getenv("PIXOO_IP", "192.168.2.230")
@@ -19,6 +20,7 @@ SSE_CONNECT_TIMEOUT_SECONDS = float(os.getenv("SSE_CONNECT_TIMEOUT_SECONDS", "10
 SSE_READ_TIMEOUT_SECONDS = float(os.getenv("SSE_READ_TIMEOUT_SECONDS", "65"))
 SSE_RECONNECT_BASE_SECONDS = float(os.getenv("SSE_RECONNECT_BASE_SECONDS", "5"))
 SSE_RECONNECT_MAX_SECONDS = float(os.getenv("SSE_RECONNECT_MAX_SECONDS", "60"))
+SHOW_BIRD_NAME = os.getenv("SHOW_BIRD_NAME", "1").lower() in ("1", "true", "yes")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_CACHE_DIR = os.getenv("IMAGE_CACHE_DIR", os.path.join(PROJECT_DIR, "cache", "images"))
 IMAGE_CACHE_ENABLED = os.getenv("IMAGE_CACHE_ENABLED", "1").lower() not in ("0", "false", "no")
@@ -121,6 +123,52 @@ def save_cache_metadata(meta_path: str, source_url: str, etag: str = "", last_mo
     with open(temp_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle)
     os.replace(temp_path, meta_path)
+
+
+def fit_text_to_width(text: str, draw: ImageDraw.ImageDraw, font: Any, max_width: int):
+    if not text:
+        return ""
+
+    if draw.textbbox((0, 0), text, font=font)[2] <= max_width:
+        return text
+
+    suffix = "..."
+    for end in range(len(text), 0, -1):
+        candidate = text[:end].rstrip() + suffix
+        if draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
+            return candidate
+
+    return suffix
+
+
+def draw_name_overlay(img: Image.Image, bird_name: str):
+    if not bird_name:
+        return ImageOps.fit(img, (64, 64), method=Image.Resampling.LANCZOS)
+
+    canvas = Image.new("RGB", (64, 64), (0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default()
+    max_text_width = canvas.width - 2
+    text = fit_text_to_width(bird_name, draw, font, max_text_width)
+    text_bbox = draw.textbbox((0, 0), text, font=font)
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+
+    # Reserve bottom rows for the label and fit/crop the bird image into the remaining area.
+    strip_height = int(max(text_height + 2, 9))
+    strip_height = int(min(strip_height, canvas.height - 1))
+    image_height = int(canvas.height - strip_height)
+
+    bird_area = ImageOps.fit(img, (canvas.width, image_height), method=Image.Resampling.LANCZOS)
+    canvas.paste(bird_area, (0, 0))
+
+    strip_top = image_height
+    draw.rectangle([(0, strip_top), (canvas.width - 1, canvas.height - 1)], fill=(0, 0, 0))
+
+    x = max(0, (canvas.width - text_width) // 2)
+    y = strip_top + max(0, (strip_height - text_height) // 2)
+    draw.text((x, y), text, fill=(255, 255, 255), font=font)
+    return canvas
 
 def image_from_url(url: str):
     cache_path = cache_path_for_url(url)
@@ -281,7 +329,10 @@ def process_detection(detection):
         raise RuntimeError(f"No image URL in detection payload: {detection}")
 
     img = image_from_url(detection["image_url"])
-    img = ImageOps.fit(img, (64, 64), method=Image.Resampling.LANCZOS)
+    if SHOW_BIRD_NAME:
+        img = draw_name_overlay(img, detection.get("common_name", ""))
+    else:
+        img = ImageOps.fit(img, (64, 64), method=Image.Resampling.LANCZOS)
     try:
         pixoo.send_image(img)  # type: ignore[arg-type]
     except (TimeoutError, socket.timeout) as exc:
