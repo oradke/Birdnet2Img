@@ -37,6 +37,9 @@ It is designed for simple home-lab and wildlife-monitoring setups where BirdNET-
 - `install_systemd_service.sh`  
   Raspberry Pi installer that copies the app to `/opt/pixoo`, creates or updates the virtual environment, installs dependencies, and enables the `systemd` service.
 
+- `deinstall_systemd_service.sh`  
+  Raspberry Pi uninstaller that stops and disables the `systemd` service and removes `/etc/default/birdnet-sse` and `/etc/systemd/system/birdnet-sse.service` while leaving `/opt/pixoo/.venv` intact.
+
 ## Requirements
 
 - Python 3.10+ recommended
@@ -189,7 +192,7 @@ sudo apt install -y python3 python3-venv
 From the project directory:
 
 ```bash
-chmod +x install_systemd_service.sh run_birdnet_sse.sh
+chmod +x install_systemd_service.sh deinstall_systemd_service.sh run_birdnet_sse.sh
 sudo ./install_systemd_service.sh
 ```
 
@@ -236,6 +239,14 @@ Logs:
 
 ```bash
 journalctl -u birdnet-sse.service -f
+```
+
+### Uninstall the service
+
+This removes service-related files from `/etc` and also removes the deployed application directory `/opt/pixoo` (including its virtual environment).
+
+```bash
+sudo ./deinstall_systemd_service.sh
 ```
 
 ## Notes
