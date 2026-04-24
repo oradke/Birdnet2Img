@@ -155,7 +155,7 @@ def draw_name_overlay(img: Image.Image, bird_name: str):
     text_height = text_bbox[3] - text_bbox[1]
 
     # Reserve bottom rows for the label and fit/crop the bird image into the remaining area.
-    strip_height = int(max(text_height + 2, 9))
+    strip_height = int(max(text_height + 1, 8))
     strip_height = int(min(strip_height, canvas.height - 1))
     image_height = int(canvas.height - strip_height)
 
